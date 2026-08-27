@@ -1,0 +1,17 @@
+[project]
+name = "diod-model"
+version = "0.1.0"
+description = "PyQt6 simulator for a four-quadrant photodiode and Gaussian laser spot"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+]
+
+[project.scripts]
+diod-model = "diod_model.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
