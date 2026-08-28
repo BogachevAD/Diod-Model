@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from math import exp, log, pi, radians, sqrt, tan
+from math import atan, degrees, exp, log, pi, radians, sqrt, tan
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,23 @@ class CalibrationPoint:
     angle_x_deg: float
     angle_y_deg: float
     amplitudes: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class MomentResult:
+    """Centroid/moment reconstruction from four pad amplitudes."""
+
+    sum_signal: float
+    normalized_x: float
+    normalized_y: float
+    x_mm: float
+    y_mm: float
+    angle_x_rad: float
+    angle_y_rad: float
+    angle_x_deg: float
+    angle_y_deg: float
+    model_angle_x_deg: float | None = None
+    model_angle_y_deg: float | None = None
 
 
 @dataclass
@@ -204,6 +221,140 @@ def interpolate_total_amplitude(params: ModelParameters, angle_x_deg: float, ang
 def pad_amplitudes(params: ModelParameters, angle_x_deg: float, angle_y_deg: float) -> tuple[float, float, float, float]:
     gain = interpolate_signal_gain(params, angle_x_deg, angle_y_deg)
     return tuple(value * gain for value in segment_energy(params, angle_x_deg, angle_y_deg))
+
+
+def moment_result(params: ModelParameters, amplitudes: Sequence[float]) -> MomentResult:
+    """Reconstruct normalized moments, linear spot coordinates and angles.
+
+    Amplitude order is clockwise from the upper-left segment:
+    Q1 upper-left, Q2 upper-right, Q3 lower-right, Q4 lower-left.
+    Normalized coordinates are computed from quadrant sums and then scaled by
+    the active-area radius to get millimetres. Angles use atan(offset/focus).
+    """
+
+    if len(amplitudes) != 4:
+        raise ValueError("Moment calculation requires exactly four amplitudes")
+    q1, q2, q3, q4 = (float(value) for value in amplitudes)
+    total = q1 + q2 + q3 + q4
+    if total <= 0:
+        return MomentResult(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    normalized_x = ((q2 + q3) - (q1 + q4)) / total
+    normalized_y = ((q1 + q2) - (q3 + q4)) / total
+    x_mm = normalized_x * params.diode_radius_mm
+    y_mm = normalized_y * params.diode_radius_mm
+    angle_x_rad = atan(x_mm / params.focal_length_mm)
+    angle_y_rad = atan(y_mm / params.focal_length_mm)
+    return MomentResult(
+        total,
+        normalized_x,
+        normalized_y,
+        x_mm,
+        y_mm,
+        angle_x_rad,
+        angle_y_rad,
+        degrees(angle_x_rad),
+        degrees(angle_y_rad),
+    )
+
+
+def moment_sensitivity_coefficients(params: ModelParameters) -> tuple[float, float]:
+    """Estimate local slopes dMx/dx and dMy/dy near the optical centre.
+
+    These coefficients are the missing calibration constants for the classical
+    difference-over-sum formula. For a quadrant detector they depend on beam
+    size, gap and circular geometry, so generally K is not equal to 1 / R.
+    """
+
+    delta_angle = max(params.angle_step_deg / 10.0, 1e-4)
+    x_plus = params.spot_center_mm(delta_angle, 0.0)[0]
+    y_plus = params.spot_center_mm(0.0, delta_angle)[1]
+    mx_plus = moment_result(params, segment_energy(params, delta_angle, 0.0)).normalized_x
+    mx_minus = moment_result(params, segment_energy(params, -delta_angle, 0.0)).normalized_x
+    my_plus = moment_result(params, segment_energy(params, 0.0, delta_angle)).normalized_y
+    my_minus = moment_result(params, segment_energy(params, 0.0, -delta_angle)).normalized_y
+    kx = (mx_plus - mx_minus) / (2.0 * x_plus) if x_plus else 0.0
+    ky = (my_plus - my_minus) / (2.0 * y_plus) if y_plus else 0.0
+    return kx, ky
+
+
+def calibrated_linear_angles(params: ModelParameters, amplitudes: Sequence[float]) -> tuple[float, float, float, float]:
+    """Return locally calibrated x/y offsets and angles from moments."""
+
+    result = moment_result(params, amplitudes)
+    kx, ky = moment_sensitivity_coefficients(params)
+    x_mm = result.normalized_x / kx if kx else 0.0
+    y_mm = result.normalized_y / ky if ky else 0.0
+    return x_mm, y_mm, degrees(atan(x_mm / params.focal_length_mm)), degrees(atan(y_mm / params.focal_length_mm))
+
+
+def reconstruct_angles_by_model(params: ModelParameters, amplitudes: Sequence[float]) -> tuple[float, float]:
+    """Find angles whose simulated one-axis moments best match amplitudes.
+
+    A circular segmented detector has a nonlinear difference-over-sum response,
+    especially for a finite Gaussian spot and dead gaps. Therefore Mx * R and
+    My * R are only a rough linear approximation. This helper inverts the same
+    model used for simulation by searching one axis at a time across the
+    configured angular field.
+    """
+
+    target = moment_result(params, amplitudes)
+    count = round(params.field_deg / params.angle_step_deg)
+
+    best_x_error = float("inf")
+    best_x = 0.0
+    best_y_error = float("inf")
+    best_y = 0.0
+    for index in range(count + 1):
+        angle = -params.half_field_deg + index * params.angle_step_deg
+        simulated_x = moment_result(params, segment_energy(params, angle, 0.0))
+        x_error = abs(simulated_x.normalized_x - target.normalized_x)
+        if x_error < best_x_error:
+            best_x_error = x_error
+            best_x = angle
+
+        simulated_y = moment_result(params, segment_energy(params, 0.0, angle))
+        y_error = abs(simulated_y.normalized_y - target.normalized_y)
+        if y_error < best_y_error:
+            best_y_error = y_error
+            best_y = angle
+    return best_x, best_y
+
+
+def moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:
+    """Return a human-readable substitution for moment formulas."""
+
+    q1, q2, q3, q4 = (float(value) for value in amplitudes)
+    result = moment_result(params, (q1, q2, q3, q4))
+    calibrated_x, calibrated_y, calibrated_ax, calibrated_ay = calibrated_linear_angles(params, (q1, q2, q3, q4))
+    kx, ky = moment_sensitivity_coefficients(params)
+    model_ax, model_ay = reconstruct_angles_by_model(params, (q1, q2, q3, q4))
+    total = result.sum_signal
+    if total <= 0:
+        return "S = Q1 + Q2 + Q3 + Q4 = 0; расчет моментов невозможен."
+    return (
+        "Буквенные формулы:\n"
+        "S = Q1 + Q2 + Q3 + Q4\n"
+        "Mx = ((Q2 + Q3) - (Q1 + Q4)) / S\n"
+        "My = ((Q1 + Q2) - (Q3 + Q4)) / S\n"
+        "Грубое приближение: x = Mx · R, y = My · R\n"
+        "Калиброванная линейная формула: x = Mx / Kx, y = My / Ky\n"
+        "αx = atan(x / f), αy = atan(y / f)\n\n"
+        "С подстановкой текущих амплитуд:\n"
+        f"S = {q1:.6g} + {q2:.6g} + {q3:.6g} + {q4:.6g} = {total:.6g}\n"
+        f"Mx = (({q2:.6g} + {q3:.6g}) - ({q1:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_x:.6g}\n"
+        f"My = (({q1:.6g} + {q2:.6g}) - ({q3:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_y:.6g}\n"
+        f"x = {result.normalized_x:.6g} · {params.diode_radius_mm:.6g} мм = {result.x_mm:.6g} мм\n"
+        f"y = {result.normalized_y:.6g} · {params.diode_radius_mm:.6g} мм = {result.y_mm:.6g} мм\n"
+        f"αx = atan({result.x_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_x_rad:.6g} рад = {result.angle_x_deg:.6g}°\n"
+        f"αy = atan({result.y_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_y_rad:.6g} рад = {result.angle_y_deg:.6g}°\n\n"
+        "Калиброванная линейная формула около центра:\n"
+        f"Kx = dMx/dx ≈ {kx:.6g} 1/мм, Ky = dMy/dy ≈ {ky:.6g} 1/мм\n"
+        f"x = {result.normalized_x:.6g} / {kx:.6g} = {calibrated_x:.6g} мм; αx ≈ {calibrated_ax:.6g}°\n"
+        f"y = {result.normalized_y:.6g} / {ky:.6g} = {calibrated_y:.6g} мм; αy ≈ {calibrated_ay:.6g}°\n\n"
+        "Важно: M · R — не классическая точная формула, а грубая шкала. Для сегментного круглого датчика классическая разностно-суммарная формула требует калибровочного коэффициента K и работает линейно только около центра.\n"
+        f"Инверсия по полной модели перекрытия: αx ≈ {model_ax:.6g}°, αy ≈ {model_ay:.6g}°"
+    )
 
 
 def parse_calibration_lines(lines: Iterable[str]) -> list[CalibrationPoint]:

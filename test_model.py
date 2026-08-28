@@ -1,11 +1,14 @@
 from model import (
     CalibrationPoint,
+    calibrated_linear_angles,
     ModelParameters,
     geometric_weights,
     interpolate_total_amplitude,
+    moment_result,
     normalize_calibration_points,
     pad_amplitudes,
     parse_calibration_lines,
+    reconstruct_angles_by_model,
     segment_energy,
 )
 
@@ -41,6 +44,30 @@ def test_total_signal_drops_when_spot_leaves_photodiode():
     centered = sum(pad_amplitudes(params, 0.0, 0.0))
     outside = sum(pad_amplitudes(params, 8.0, 0.0))
     assert outside < centered
+
+
+def test_moment_result_reconstructs_positive_x_angle():
+    params = ModelParameters()
+    result = moment_result(params, (1.0, 2.0, 2.0, 1.0))
+    assert result.normalized_x > 0
+    assert result.normalized_y == 0
+    assert result.angle_x_rad > 0
+
+
+def test_calibrated_linear_angle_is_closer_than_radius_scaling_near_center():
+    params = ModelParameters(integration_step_mm=0.03)
+    amplitudes = segment_energy(params, 0.0, 0.5)
+    naive = moment_result(params, amplitudes).angle_y_deg
+    _, _, _, calibrated = calibrated_linear_angles(params, amplitudes)
+    assert abs(calibrated - 0.5) < abs(naive - 0.5)
+
+
+def test_model_reconstruction_matches_simulated_axis_angle():
+    params = ModelParameters(integration_step_mm=0.03)
+    amplitudes = segment_energy(params, 0.0, 1.3)
+    ax, ay = reconstruct_angles_by_model(params, amplitudes)
+    assert abs(ax) <= params.angle_step_deg
+    assert abs(ay - 1.3) <= params.angle_step_deg
 
 
 def test_manual_calibration_parser_accepts_header_and_clockwise_values():

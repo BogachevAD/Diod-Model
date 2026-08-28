@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import DEFAULT_CALIBRATION_POINTS, DEFAULT_PARAMETERS
-from model import CalibrationPoint, ModelParameters, angle_grid, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
+from model import CalibrationPoint, ModelParameters, angle_grid, moment_explanation, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
 
 
 class PhotodiodeWindow(QMainWindow):
@@ -52,9 +52,14 @@ class PhotodiodeWindow(QMainWindow):
         self.scene = QGraphicsScene(self)
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHints(self.view.renderHints())
-        left.addWidget(self.view)
+        left.addWidget(self.view, 3)
         self.position_label = QLabel()
         left.addWidget(self.position_label)
+        left.addWidget(QLabel("Проверка по формулам моментов"))
+        self.moment_text = QTextEdit()
+        self.moment_text.setReadOnly(True)
+        self.moment_text.setMinimumHeight(260)
+        left.addWidget(self.moment_text, 2)
 
         right = QVBoxLayout()
         main.addLayout(right, 1)
@@ -104,7 +109,6 @@ class PhotodiodeWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["Площадка", "Амплитуда"])
         right.addWidget(self.table)
         self.update_parameters()
-
 
     def reset_defaults(self) -> None:
         for key, box in self.controls.items():
@@ -178,6 +182,7 @@ class PhotodiodeWindow(QMainWindow):
         for row, value in enumerate(amplitudes):
             self.table.setItem(row, 0, QTableWidgetItem(f"Q{row + 1}"))
             self.table.setItem(row, 1, QTableWidgetItem(f"{value:.6f}"))
+        self.moment_text.setPlainText(moment_explanation(self.params, amplitudes))
         self.position_label.setText(f"Угол: X={self.angle_x:.3f}°, Y={self.angle_y:.3f}°; центр пятна: x={cx:.3f} мм, y={cy:.3f} мм")
 
     def load_calibration(self) -> None:
