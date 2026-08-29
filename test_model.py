@@ -4,7 +4,9 @@ from model import (
     ModelParameters,
     geometric_weights,
     interpolate_total_amplitude,
+    linear_moment_explanation,
     moment_result,
+    nonlinear_moment_explanation,
     normalize_calibration_points,
     pad_amplitudes,
     parse_calibration_lines,
@@ -68,6 +70,17 @@ def test_model_reconstruction_matches_simulated_axis_angle():
     ax, ay = reconstruct_angles_by_model(params, amplitudes)
     assert abs(ax) <= params.angle_step_deg
     assert abs(ay - 1.3) <= params.angle_step_deg
+
+
+def test_explanations_include_substitution_and_three_decimal_angles():
+    params = ModelParameters(integration_step_mm=0.03)
+    amplitudes = segment_energy(params, 0.0, 1.3)
+    linear = linear_moment_explanation(params, amplitudes)
+    nonlinear = nonlinear_moment_explanation(params, amplitudes)
+    assert "My = ((" in linear
+    assert "αy =" in linear
+    assert "Ky = (" in nonlinear
+    assert "Угол по полной модели" in nonlinear
 
 
 def test_manual_calibration_parser_accepts_header_and_clockwise_values():

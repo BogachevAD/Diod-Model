@@ -258,24 +258,40 @@ def moment_result(params: ModelParameters, amplitudes: Sequence[float]) -> Momen
     )
 
 
-def moment_sensitivity_coefficients(params: ModelParameters) -> tuple[float, float]:
-    """Estimate local slopes dMx/dx and dMy/dy near the optical centre.
-
-    These coefficients are the missing calibration constants for the classical
-    difference-over-sum formula. For a quadrant detector they depend on beam
-    size, gap and circular geometry, so generally K is not equal to 1 / R.
-    """
+def moment_sensitivity_details(params: ModelParameters) -> dict[str, float]:
+    """Return finite-difference values used for local moment sensitivity."""
 
     delta_angle = max(params.angle_step_deg / 10.0, 1e-4)
     x_plus = params.spot_center_mm(delta_angle, 0.0)[0]
+    x_minus = params.spot_center_mm(-delta_angle, 0.0)[0]
     y_plus = params.spot_center_mm(0.0, delta_angle)[1]
+    y_minus = params.spot_center_mm(0.0, -delta_angle)[1]
     mx_plus = moment_result(params, segment_energy(params, delta_angle, 0.0)).normalized_x
     mx_minus = moment_result(params, segment_energy(params, -delta_angle, 0.0)).normalized_x
     my_plus = moment_result(params, segment_energy(params, 0.0, delta_angle)).normalized_y
     my_minus = moment_result(params, segment_energy(params, 0.0, -delta_angle)).normalized_y
-    kx = (mx_plus - mx_minus) / (2.0 * x_plus) if x_plus else 0.0
-    ky = (my_plus - my_minus) / (2.0 * y_plus) if y_plus else 0.0
-    return kx, ky
+    kx = (mx_plus - mx_minus) / (x_plus - x_minus) if x_plus != x_minus else 0.0
+    ky = (my_plus - my_minus) / (y_plus - y_minus) if y_plus != y_minus else 0.0
+    return {
+        "delta_angle_deg": delta_angle,
+        "x_plus_mm": x_plus,
+        "x_minus_mm": x_minus,
+        "y_plus_mm": y_plus,
+        "y_minus_mm": y_minus,
+        "mx_plus": mx_plus,
+        "mx_minus": mx_minus,
+        "my_plus": my_plus,
+        "my_minus": my_minus,
+        "kx": kx,
+        "ky": ky,
+    }
+
+
+def moment_sensitivity_coefficients(params: ModelParameters) -> tuple[float, float]:
+    """Estimate local slopes dMx/dx and dMy/dy near the optical centre."""
+
+    details = moment_sensitivity_details(params)
+    return details["kx"], details["ky"]
 
 
 def calibrated_linear_angles(params: ModelParameters, amplitudes: Sequence[float]) -> tuple[float, float, float, float]:
@@ -289,14 +305,7 @@ def calibrated_linear_angles(params: ModelParameters, amplitudes: Sequence[float
 
 
 def reconstruct_angles_by_model(params: ModelParameters, amplitudes: Sequence[float]) -> tuple[float, float]:
-    """Find angles whose simulated one-axis moments best match amplitudes.
-
-    A circular segmented detector has a nonlinear difference-over-sum response,
-    especially for a finite Gaussian spot and dead gaps. Therefore Mx * R and
-    My * R are only a rough linear approximation. This helper inverts the same
-    model used for simulation by searching one axis at a time across the
-    configured angular field.
-    """
+    """Find angles whose simulated one-axis moments best match amplitudes."""
 
     target = moment_result(params, amplitudes)
     count = round(params.field_deg / params.angle_step_deg)
@@ -321,40 +330,65 @@ def reconstruct_angles_by_model(params: ModelParameters, amplitudes: Sequence[fl
     return best_x, best_y
 
 
-def moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:
-    """Return a human-readable substitution for moment formulas."""
+def linear_moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:
+    """Return one-line formulas and substitutions for the linear moment check."""
 
     q1, q2, q3, q4 = (float(value) for value in amplitudes)
     result = moment_result(params, (q1, q2, q3, q4))
+    total = result.sum_signal
+    if total <= 0:
+        return "S = Q1 + Q2 + Q3 + Q4 = 0; линейный расчет невозможен."
+    return "\n".join(
+        [
+            "Линейный блок: грубая шкала x = Mx · R, y = My · R.",
+            "S = Q1 + Q2 + Q3 + Q4.",
+            f"S = {q1:.6g} + {q2:.6g} + {q3:.6g} + {q4:.6g} = {total:.6g}.",
+            "Mx = ((Q2 + Q3) - (Q1 + Q4)) / S.",
+            f"Mx = (({q2:.6g} + {q3:.6g}) - ({q1:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_x:.6g}.",
+            "My = ((Q1 + Q2) - (Q3 + Q4)) / S.",
+            f"My = (({q1:.6g} + {q2:.6g}) - ({q3:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_y:.6g}.",
+            "x = Mx · R; y = My · R.",
+            f"x = {result.normalized_x:.6g} · {params.diode_radius_mm:.6g} = {result.x_mm:.6g} мм; y = {result.normalized_y:.6g} · {params.diode_radius_mm:.6g} = {result.y_mm:.6g} мм.",
+            "αx = atan(x / f); αy = atan(y / f).",
+            f"αx = atan({result.x_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_x_deg:.3f}°; αy = atan({result.y_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_y_deg:.3f}°.",
+        ]
+    )
+
+
+def nonlinear_moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:
+    """Return detailed calibrated/nonlinear moment reconstruction text."""
+
+    q1, q2, q3, q4 = (float(value) for value in amplitudes)
+    result = moment_result(params, (q1, q2, q3, q4))
+    details = moment_sensitivity_details(params)
     calibrated_x, calibrated_y, calibrated_ax, calibrated_ay = calibrated_linear_angles(params, (q1, q2, q3, q4))
-    kx, ky = moment_sensitivity_coefficients(params)
     model_ax, model_ay = reconstruct_angles_by_model(params, (q1, q2, q3, q4))
     total = result.sum_signal
     if total <= 0:
-        return "S = Q1 + Q2 + Q3 + Q4 = 0; расчет моментов невозможен."
-    return (
-        "Буквенные формулы:\n"
-        "S = Q1 + Q2 + Q3 + Q4\n"
-        "Mx = ((Q2 + Q3) - (Q1 + Q4)) / S\n"
-        "My = ((Q1 + Q2) - (Q3 + Q4)) / S\n"
-        "Грубое приближение: x = Mx · R, y = My · R\n"
-        "Калиброванная линейная формула: x = Mx / Kx, y = My / Ky\n"
-        "αx = atan(x / f), αy = atan(y / f)\n\n"
-        "С подстановкой текущих амплитуд:\n"
-        f"S = {q1:.6g} + {q2:.6g} + {q3:.6g} + {q4:.6g} = {total:.6g}\n"
-        f"Mx = (({q2:.6g} + {q3:.6g}) - ({q1:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_x:.6g}\n"
-        f"My = (({q1:.6g} + {q2:.6g}) - ({q3:.6g} + {q4:.6g})) / {total:.6g} = {result.normalized_y:.6g}\n"
-        f"x = {result.normalized_x:.6g} · {params.diode_radius_mm:.6g} мм = {result.x_mm:.6g} мм\n"
-        f"y = {result.normalized_y:.6g} · {params.diode_radius_mm:.6g} мм = {result.y_mm:.6g} мм\n"
-        f"αx = atan({result.x_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_x_rad:.6g} рад = {result.angle_x_deg:.6g}°\n"
-        f"αy = atan({result.y_mm:.6g} / {params.focal_length_mm:.6g}) = {result.angle_y_rad:.6g} рад = {result.angle_y_deg:.6g}°\n\n"
-        "Калиброванная линейная формула около центра:\n"
-        f"Kx = dMx/dx ≈ {kx:.6g} 1/мм, Ky = dMy/dy ≈ {ky:.6g} 1/мм\n"
-        f"x = {result.normalized_x:.6g} / {kx:.6g} = {calibrated_x:.6g} мм; αx ≈ {calibrated_ax:.6g}°\n"
-        f"y = {result.normalized_y:.6g} / {ky:.6g} = {calibrated_y:.6g} мм; αy ≈ {calibrated_ay:.6g}°\n\n"
-        "Важно: M · R — не классическая точная формула, а грубая шкала. Для сегментного круглого датчика классическая разностно-суммарная формула требует калибровочного коэффициента K и работает линейно только около центра.\n"
-        f"Инверсия по полной модели перекрытия: αx ≈ {model_ax:.6g}°, αy ≈ {model_ay:.6g}°"
+        return "S = Q1 + Q2 + Q3 + Q4 = 0; нелинейный расчет невозможен."
+    return "\n".join(
+        [
+            "Нелинейный блок: коэффициент K считается из производной около центра, затем выполняется обратный поиск по модели.",
+            f"Исходные моменты: Mx = {result.normalized_x:.6g}; My = {result.normalized_y:.6g}.",
+            "Kx = dMx/dx ≈ (Mx(+δ) - Mx(-δ)) / (x(+δ) - x(-δ)).",
+            f"δ = {details['delta_angle_deg']:.6g}°; x(+δ) = {details['x_plus_mm']:.6g} мм; x(-δ) = {details['x_minus_mm']:.6g} мм; Mx(+δ) = {details['mx_plus']:.6g}; Mx(-δ) = {details['mx_minus']:.6g}.",
+            f"Kx = ({details['mx_plus']:.6g} - {details['mx_minus']:.6g}) / ({details['x_plus_mm']:.6g} - {details['x_minus_mm']:.6g}) = {details['kx']:.6g} 1/мм.",
+            "Ky = dMy/dy ≈ (My(+δ) - My(-δ)) / (y(+δ) - y(-δ)).",
+            f"δ = {details['delta_angle_deg']:.6g}°; y(+δ) = {details['y_plus_mm']:.6g} мм; y(-δ) = {details['y_minus_mm']:.6g} мм; My(+δ) = {details['my_plus']:.6g}; My(-δ) = {details['my_minus']:.6g}.",
+            f"Ky = ({details['my_plus']:.6g} - {details['my_minus']:.6g}) / ({details['y_plus_mm']:.6g} - {details['y_minus_mm']:.6g}) = {details['ky']:.6g} 1/мм.",
+            "Калиброванная линейная формула: x = Mx / Kx; y = My / Ky.",
+            f"x = {result.normalized_x:.6g} / {details['kx']:.6g} = {calibrated_x:.6g} мм; y = {result.normalized_y:.6g} / {details['ky']:.6g} = {calibrated_y:.6g} мм.",
+            f"Угол по калиброванной линейной формуле: αx = {calibrated_ax:.3f}°; αy = {calibrated_ay:.3f}°.",
+            "Обратный поиск: для каждого угла сетки моделируются Q1..Q4, считаются Mx/My, выбирается минимальная ошибка момента.",
+            f"Угол по полной модели: αx = {model_ax:.3f}°; αy = {model_ay:.3f}°.",
+        ]
     )
+
+
+def moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:
+    """Return both linear and nonlinear moment explanations."""
+
+    return linear_moment_explanation(params, amplitudes) + "\n\n" + nonlinear_moment_explanation(params, amplitudes)
 
 
 def parse_calibration_lines(lines: Iterable[str]) -> list[CalibrationPoint]:

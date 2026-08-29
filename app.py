@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush, QPen
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -28,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import DEFAULT_CALIBRATION_POINTS, DEFAULT_PARAMETERS
-from model import CalibrationPoint, ModelParameters, angle_grid, moment_explanation, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
+from model import CalibrationPoint, ModelParameters, angle_grid, linear_moment_explanation, nonlinear_moment_explanation, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
 
 
 class PhotodiodeWindow(QMainWindow):
@@ -55,11 +56,22 @@ class PhotodiodeWindow(QMainWindow):
         left.addWidget(self.view, 3)
         self.position_label = QLabel()
         left.addWidget(self.position_label)
-        left.addWidget(QLabel("Проверка по формулам моментов"))
-        self.moment_text = QTextEdit()
-        self.moment_text.setReadOnly(True)
-        self.moment_text.setMinimumHeight(260)
-        left.addWidget(self.moment_text, 2)
+        self.linear_checkbox = QCheckBox("Линейный расчет моментов")
+        self.linear_checkbox.setChecked(True)
+        self.linear_checkbox.toggled.connect(self.redraw)
+        left.addWidget(self.linear_checkbox)
+        self.linear_moment_text = QTextEdit()
+        self.linear_moment_text.setReadOnly(True)
+        self.linear_moment_text.setMinimumHeight(170)
+        left.addWidget(self.linear_moment_text, 1)
+        self.nonlinear_checkbox = QCheckBox("Нелинейный / калиброванный расчет")
+        self.nonlinear_checkbox.setChecked(True)
+        self.nonlinear_checkbox.toggled.connect(self.redraw)
+        left.addWidget(self.nonlinear_checkbox)
+        self.nonlinear_moment_text = QTextEdit()
+        self.nonlinear_moment_text.setReadOnly(True)
+        self.nonlinear_moment_text.setMinimumHeight(240)
+        left.addWidget(self.nonlinear_moment_text, 2)
 
         right = QVBoxLayout()
         main.addLayout(right, 1)
@@ -118,6 +130,8 @@ class PhotodiodeWindow(QMainWindow):
         self.params = ModelParameters(**self.default_params.__dict__)
         self.params.calibration_points = list(self.default_calibration)
         self.manual_points.clear()
+        self.linear_checkbox.setChecked(True)
+        self.nonlinear_checkbox.setChecked(True)
         self.x_slider.blockSignals(True)
         self.y_slider.blockSignals(True)
         self.x_slider.setValue(0)
@@ -182,7 +196,18 @@ class PhotodiodeWindow(QMainWindow):
         for row, value in enumerate(amplitudes):
             self.table.setItem(row, 0, QTableWidgetItem(f"Q{row + 1}"))
             self.table.setItem(row, 1, QTableWidgetItem(f"{value:.6f}"))
-        self.moment_text.setPlainText(moment_explanation(self.params, amplitudes))
+        if self.linear_checkbox.isChecked():
+            self.linear_moment_text.setPlainText(linear_moment_explanation(self.params, amplitudes))
+            self.linear_moment_text.setEnabled(True)
+        else:
+            self.linear_moment_text.clear()
+            self.linear_moment_text.setEnabled(False)
+        if self.nonlinear_checkbox.isChecked():
+            self.nonlinear_moment_text.setPlainText(nonlinear_moment_explanation(self.params, amplitudes))
+            self.nonlinear_moment_text.setEnabled(True)
+        else:
+            self.nonlinear_moment_text.clear()
+            self.nonlinear_moment_text.setEnabled(False)
         self.position_label.setText(f"Угол: X={self.angle_x:.3f}°, Y={self.angle_y:.3f}°; центр пятна: x={cx:.3f} мм, y={cy:.3f} мм")
 
     def load_calibration(self) -> None:
