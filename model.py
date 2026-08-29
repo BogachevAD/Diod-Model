@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from math import atan, degrees, exp, log, pi, radians, sqrt, tan
 
 
@@ -328,6 +329,175 @@ def reconstruct_angles_by_model(params: ModelParameters, amplitudes: Sequence[fl
             best_y_error = y_error
             best_y = angle
     return best_x, best_y
+
+
+def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    """Solve a small dense system using Gaussian elimination with pivoting."""
+
+    size = len(vector)
+    augmented = [row[:] + [value] for row, value in zip(matrix, vector)]
+    for column in range(size):
+        pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
+        if abs(augmented[pivot][column]) < 1e-14:
+            raise ValueError("Cannot fit inverse polynomial: singular system")
+        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        augmented[column] = [value / divisor for value in augmented[column]]
+        for row in range(size):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            augmented[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(augmented[row], augmented[column])
+            ]
+    return [augmented[row][-1] for row in range(size)]
+
+
+@lru_cache(maxsize=32)
+def _inverse_polynomial_coefficients_cached(
+    diode_diameter_mm: float,
+    gap_um: float,
+    beam_diameter_mm: float,
+    focal_length_mm: float,
+    field_deg: float,
+    energy_fraction_diameter_part: float,
+    energy_fraction: float,
+    integration_step_mm: float,
+    degree: int,
+) -> tuple[float, ...]:
+    params = ModelParameters(
+        diode_diameter_mm=diode_diameter_mm,
+        gap_um=gap_um,
+        beam_diameter_mm=beam_diameter_mm,
+        focal_length_mm=focal_length_mm,
+        field_deg=field_deg,
+        energy_fraction_diameter_part=energy_fraction_diameter_part,
+        energy_fraction=energy_fraction,
+        integration_step_mm=integration_step_mm,
+    )
+    powers = tuple(range(1, degree + 1, 2))
+    sample_count = 101
+    samples: list[tuple[float, float]] = []
+    for index in range(sample_count):
+        angle = -params.half_field_deg + params.field_deg * index / (sample_count - 1)
+        amplitudes = segment_energy(params, angle, 0.0)
+        moment = moment_result(params, amplitudes).normalized_x
+        samples.append((moment, angle))
+
+    matrix = [
+        [sum(moment ** (row_power + column_power) for moment, _ in samples) for column_power in powers]
+        for row_power in powers
+    ]
+    vector = [sum(angle * moment**power for moment, angle in samples) for power in powers]
+    return tuple(_solve_linear_system(matrix, vector))
+
+
+def inverse_polynomial_coefficients(params: ModelParameters, degree: int = 9) -> tuple[float, ...]:
+    """Fit the full one-axis inverse model as an odd hardware-ready polynomial.
+
+    The returned coefficients correspond to powers 1, 3, ..., degree:
+    angle_deg = c1*M + c3*M^3 + ... .  Odd powers preserve detector symmetry.
+    """
+
+    if degree < 1 or degree % 2 == 0:
+        raise ValueError("Inverse polynomial degree must be a positive odd number")
+    return _inverse_polynomial_coefficients_cached(
+        params.diode_diameter_mm,
+        params.gap_um,
+        params.beam_diameter_mm,
+        params.focal_length_mm,
+        params.field_deg,
+        params.energy_fraction_diameter_part,
+        params.energy_fraction,
+        params.integration_step_mm,
+        degree,
+    )
+
+
+def evaluate_inverse_polynomial(moment: float, coefficients: Sequence[float]) -> float:
+    """Evaluate c1*M + c3*M^3 + ... using the fitted coefficients."""
+
+    return sum(coefficient * moment ** (2 * index + 1) for index, coefficient in enumerate(coefficients))
+
+
+def inverse_polynomial_max_error(params: ModelParameters, coefficients: Sequence[float]) -> float:
+    """Return maximum angular fit error on a grid twice as fine as the model grid."""
+
+    return _inverse_polynomial_max_error_cached(
+        params.diode_diameter_mm,
+        params.gap_um,
+        params.beam_diameter_mm,
+        params.focal_length_mm,
+        params.field_deg,
+        params.angle_step_deg,
+        params.energy_fraction_diameter_part,
+        params.energy_fraction,
+        params.integration_step_mm,
+        tuple(coefficients),
+    )
+
+
+@lru_cache(maxsize=32)
+def _inverse_polynomial_max_error_cached(
+    diode_diameter_mm: float,
+    gap_um: float,
+    beam_diameter_mm: float,
+    focal_length_mm: float,
+    field_deg: float,
+    angle_step_deg: float,
+    energy_fraction_diameter_part: float,
+    energy_fraction: float,
+    integration_step_mm: float,
+    coefficients: tuple[float, ...],
+) -> float:
+    params = ModelParameters(
+        diode_diameter_mm=diode_diameter_mm,
+        gap_um=gap_um,
+        beam_diameter_mm=beam_diameter_mm,
+        focal_length_mm=focal_length_mm,
+        field_deg=field_deg,
+        angle_step_deg=angle_step_deg,
+        energy_fraction_diameter_part=energy_fraction_diameter_part,
+        energy_fraction=energy_fraction,
+        integration_step_mm=integration_step_mm,
+    )
+    step = max(params.angle_step_deg / 2.0, 0.01)
+    count = max(1, round(params.field_deg / step))
+    maximum = 0.0
+    for index in range(count + 1):
+        angle = -params.half_field_deg + params.field_deg * index / count
+        moment = moment_result(params, segment_energy(params, angle, 0.0)).normalized_x
+        maximum = max(maximum, abs(evaluate_inverse_polynomial(moment, coefficients) - angle))
+    return maximum
+
+
+def full_model_function_explanation(params: ModelParameters, amplitudes: Sequence[float], degree: int = 9) -> str:
+    """Describe and evaluate the polynomial approximation of the full model."""
+
+    result = moment_result(params, amplitudes)
+    coefficients = inverse_polynomial_coefficients(params, degree)
+    terms = [
+        f"({coefficient:.10g})·M^{2 * index + 1}"
+        for index, coefficient in enumerate(coefficients)
+    ]
+    formula = " + ".join(terms).replace("+ (-", "- (")
+    polynomial_x = evaluate_inverse_polynomial(result.normalized_x, coefficients)
+    polynomial_y = evaluate_inverse_polynomial(result.normalized_y, coefficients)
+    model_x, model_y = reconstruct_angles_by_model(params, amplitudes)
+    max_error = inverse_polynomial_max_error(params, coefficients)
+    return "\n".join(
+        [
+            f"Аппроксимация обратной полной модели, нечётный полином степени {degree}:",
+            f"F(M) = {formula}, угол в градусах.",
+            "Для симметричного круглого фотодиода: αx = F(Mx), αy = F(My).",
+            f"Mx = {result.normalized_x:.9g}; My = {result.normalized_y:.9g}.",
+            f"По полиному: αx = {polynomial_x:.6f}°; αy = {polynomial_y:.6f}°.",
+            f"По эталонному перебору полной модели: αx = {model_x:.6f}°; αy = {model_y:.6f}°.",
+            f"Максимальная ошибка полинома на поле ±{params.half_field_deg:.6g}°: {max_error:.6f}°.",
+            "В железе сначала вычислить Mx/My по Q1..Q4, затем подставить каждый момент в F(M).",
+        ]
+    )
 
 
 def linear_moment_explanation(params: ModelParameters, amplitudes: Sequence[float]) -> str:

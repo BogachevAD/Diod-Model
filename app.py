@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import DEFAULT_CALIBRATION_POINTS, DEFAULT_PARAMETERS
-from model import CalibrationPoint, ModelParameters, angle_grid, linear_moment_explanation, nonlinear_moment_explanation, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
+from model import CalibrationPoint, ModelParameters, angle_grid, full_model_function_explanation, linear_moment_explanation, nonlinear_moment_explanation, normalize_calibration_points, pad_amplitudes, parse_calibration_lines
 
 
 class PhotodiodeWindow(QMainWindow):
@@ -64,7 +64,7 @@ class PhotodiodeWindow(QMainWindow):
         self.linear_moment_text.setReadOnly(True)
         self.linear_moment_text.setMinimumHeight(170)
         left.addWidget(self.linear_moment_text, 1)
-        self.nonlinear_checkbox = QCheckBox("Нелинейный / калиброванный расчет")
+        self.nonlinear_checkbox = QCheckBox("Локальный калиброванный расчет около центра")
         self.nonlinear_checkbox.setChecked(True)
         self.nonlinear_checkbox.toggled.connect(self.redraw)
         left.addWidget(self.nonlinear_checkbox)
@@ -72,6 +72,14 @@ class PhotodiodeWindow(QMainWindow):
         self.nonlinear_moment_text.setReadOnly(True)
         self.nonlinear_moment_text.setMinimumHeight(240)
         left.addWidget(self.nonlinear_moment_text, 2)
+        self.full_model_checkbox = QCheckBox("Функция полной нелинейной модели")
+        self.full_model_checkbox.setChecked(True)
+        self.full_model_checkbox.toggled.connect(self.redraw)
+        left.addWidget(self.full_model_checkbox)
+        self.full_model_text = QTextEdit()
+        self.full_model_text.setReadOnly(True)
+        self.full_model_text.setMinimumHeight(190)
+        left.addWidget(self.full_model_text, 2)
 
         right = QVBoxLayout()
         main.addLayout(right, 1)
@@ -132,6 +140,7 @@ class PhotodiodeWindow(QMainWindow):
         self.manual_points.clear()
         self.linear_checkbox.setChecked(True)
         self.nonlinear_checkbox.setChecked(True)
+        self.full_model_checkbox.setChecked(True)
         self.x_slider.blockSignals(True)
         self.y_slider.blockSignals(True)
         self.x_slider.setValue(0)
@@ -208,6 +217,12 @@ class PhotodiodeWindow(QMainWindow):
         else:
             self.nonlinear_moment_text.clear()
             self.nonlinear_moment_text.setEnabled(False)
+        if self.full_model_checkbox.isChecked():
+            self.full_model_text.setPlainText(full_model_function_explanation(self.params, amplitudes))
+            self.full_model_text.setEnabled(True)
+        else:
+            self.full_model_text.clear()
+            self.full_model_text.setEnabled(False)
         self.position_label.setText(f"Угол: X={self.angle_x:.3f}°, Y={self.angle_y:.3f}°; центр пятна: x={cx:.3f} мм, y={cy:.3f} мм")
 
     def load_calibration(self) -> None:

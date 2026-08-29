@@ -1,6 +1,10 @@
 from model import (
     CalibrationPoint,
     calibrated_linear_angles,
+    evaluate_inverse_polynomial,
+    full_model_function_explanation,
+    inverse_polynomial_coefficients,
+    inverse_polynomial_max_error,
     ModelParameters,
     geometric_weights,
     interpolate_total_amplitude,
@@ -70,6 +74,24 @@ def test_model_reconstruction_matches_simulated_axis_angle():
     ax, ay = reconstruct_angles_by_model(params, amplitudes)
     assert abs(ax) <= params.angle_step_deg
     assert abs(ay - 1.3) <= params.angle_step_deg
+
+
+def test_inverse_polynomial_reconstructs_full_field_with_small_error():
+    params = ModelParameters(integration_step_mm=0.03)
+    coefficients = inverse_polynomial_coefficients(params)
+    assert len(coefficients) == 5
+    assert inverse_polynomial_max_error(params, coefficients) < 0.04
+    amplitudes = segment_energy(params, 2.5, 0.0)
+    moment = moment_result(params, amplitudes).normalized_x
+    assert abs(evaluate_inverse_polynomial(moment, coefficients) - 2.5) < 0.04
+
+
+def test_full_model_explanation_contains_hardware_function():
+    params = ModelParameters(integration_step_mm=0.03)
+    text = full_model_function_explanation(params, segment_energy(params, 2.5, 0.0))
+    assert "F(M) =" in text
+    assert "αx = F(Mx)" in text
+    assert "Максимальная ошибка" in text
 
 
 def test_explanations_include_substitution_and_three_decimal_angles():
